@@ -60,14 +60,7 @@ module VagrantPlugins
                 libvirt_network:  nil
               }
 
-              if @options[:ip]
-                handle_ip_option(env)
-              # in vagrant 1.2.3 and later it is not possible to take this branch
-              # because cannot have name without ip
-              # https://github.com/mitchellh/vagrant/commit/cf2f6da4dbcb4f57c9cdb3b94dcd0bba62c5f5fd
-              elsif @options[:network_name]
-                handle_network_name_option
-              end
+              handle_network_options(env)
 
               autostart_network if !@interface_network[:autostart]
               activate_network if !@interface_network[:active]
@@ -96,6 +89,15 @@ module VagrantPlugins
           end
           nil
         end
+        
+        # Return hash of network for specified network address, or nil if not found.
+        def lookup_network_by_address(net_address)
+          @logger.debug "looking up network with address #{net_address}"
+          @available_networks.each do |network|
+            return network if network[:network_address] == net_address
+          end
+          nil
+        end
 
         # Throw an error if dhcp setting for an existing network does not
         # match what was configured in the vagrantfile
@@ -110,30 +112,24 @@ module VagrantPlugins
                   requested: @options[:dhcp_enabled] ? 'enabled' : 'disabled'
           end
         end
-
-        # Handle only situations, when ip is specified. Variables @options and
-        # @available_networks should be filled before calling this function.
-        def handle_ip_option(env)
-          return if !@options[:ip]
-
-          net_address = network_address(@options[:ip], @options[:netmask])
-          @interface_network[:network_address] = net_address
-
-          # Set IP address of network (actually bridge). It will be used as
-          # gateway address for machines connected to this network.
-          net = IPAddr.new(net_address)
-          # Default to first address (after network name)
-          @interface_network[:ip_address] = @options[:host_ip].nil? ? net.to_range.begin.succ : IPAddr.new(@options[:host_ip])
-
-          # Is there an available network matching to configured ip
-          # address?
-          @available_networks.each do |available_network|
-            if available_network[:network_address] == \
-            @interface_network[:network_address]
-              @interface_network = available_network
-              @logger.debug "found existing network by ip, values are"
-              @logger.debug @interface_network
-              break
+        
+        # Handle network options, if network_name is supplied then use that,
+        # otherwise search for the network using the network address
+        def handle_network_options(env)
+          
+          if @options[:network_name]
+              # If a network with this name already exists, then attach to it
+              named_network = lookup_network_by_name(@options[:network_name])
+              if named_network
+                @interface_network = named_network
+              end
+              
+          elsif @options[:ip]
+            # Find the network based on net address
+            net_address = network_address(@options[:ip], @options[:netmask])
+            result_network = lookup_network_by_address(net_address)
+            if result_network
+              @interface_network = result_network
             end
           end
 
@@ -144,20 +140,25 @@ module VagrantPlugins
           if @options[:network_name]
             @logger.debug "Checking that network name does not clash with ip"
             if @interface_network[:created]
-              # Just check for mismatch error here - if name and ip from
-              # config match together.
-              if @options[:network_name] != @interface_network[:name]
-                raise Errors::NetworkNameAndAddressMismatch,
-                      ip_address:   @options[:ip],
-                      network_name: @options[:network_name]
+              # FIXME: check forward_mode from the interface_network instead
+              # of options, though they _should_ be equal anyway.
+              if @options[:forward_mode] != 'veryisolated'
+                # Just check for mismatch error here - if name and ip from
+                # config match together.
+                if @options[:network_name] != @interface_network[:name]
+                  raise Errors::NetworkNameAndAddressMismatch,
+                        ip_address:   @options[:ip],
+                        network_name: @options[:network_name]
+                end
               end
+
             else
               # Network is not created, but name is set. We need to check,
               # whether network name from config doesn't already exist.
               if lookup_network_by_name @options[:network_name]
                 raise Errors::NetworkNameAndAddressMismatch,
-                      ip_address:   @options[:ip],
-                      network_name: @options[:network_name]
+                    ip_address:   @options[:ip],
+                    network_name: @options[:network_name]
               end
 
               # Network with 'name' doesn't exist. Set it as name for new
@@ -202,21 +203,6 @@ module VagrantPlugins
 
             # Create a private network.
             create_private_network(env)
-          end
-        end
-
-        # Handle network_name option, if ip was not specified. Variables
-        # @options and @available_networks should be filled before calling this
-        # function.
-        def handle_network_name_option
-          return if @options[:ip] || !@options[:network_name]
-
-          @interface_network = lookup_network_by_name(@options[:network_name])
-          if !@interface_network
-            raise Errors::NetworkNotAvailableError,
-                  network_name: @options[:network_name]
-          else
-            verify_dhcp
           end
         end
 
